@@ -3,15 +3,13 @@
 # Table of contents
 - ## [Contest Summary](#contest-summary)
 - ## [Results Summary](#results-summary)
-- ## High Risk Findings
-    - ### [H-01. `compound()` is prone to sandwich attacks](#H-01)
 - ## Medium Risk Findings
     - ### [M-01. Token Swap and `Repay` Revert Risk in `EmergencyClose` and `processWithdraw` Functions](#M-01)
     - ### [M-02. `addLiquidity` && `removeLiquidity` in `emergencyResume` and `emergencyPause` are prone to sandwich attacks](#M-02)
     - ### [M-03. `additionalCapacity()` function uses same weights for the maximum borrowable amounts in both tokens can overestimate/underestimate the amounts](#M-03)
     - ### [M-04. If an address gets Blacklisted by any asset tokens, there can be loss of funds](#M-04)
     - ### [M-05. `emergencyPause` does not check the state before running && can cause loss of funds for users](#M-05)
-    - ### [M-06. No expiration deadline could result to losing funds during Swaps](#M-06)
+
 - ## Low Risk Findings
     - ### [L-01. Asset like UNI can revert on Large Approvals & Transfers](#L-01)
     - ### [L-02. `ChainlinkARBOracle` and `ChainlinkOracle` do not check for stale prices](#L-02)
@@ -28,54 +26,8 @@
 # <a id='results-summary'></a>Results Summary
 
 ### Number of findings:
-   - High: 1
-   - Medium: 6
+   - Medium: 5
    - Low: 2
-
-
-# High Risk Findings
-
-## <a id='H-01'></a>H-01. `compound()` is prone to sandwich attacks            
-
-### Relevant GitHub Links
-	
-https://github.com/Cyfrin/2023-10-SteadeFi/blob/0f909e2f0917cb9ad02986f631d622376510abec/contracts/strategy/gmx/GMXCompound.sol#L65-L72
-
-https://github.com/Cyfrin/2023-10-SteadeFi/blob/0f909e2f0917cb9ad02986f631d622376510abec/contracts/swaps/UniswapSwap.sol#L67-L71
-
-## Summary
-
-The function `compound()` is supposed to be called by keeper to add more Liquidity using reward tokens when necessary. When called by the keeper, the amount of token received by the caller can be less than it should if the transaction is sandwiched. Greatly reducing potential liquidity increase and by extension the depositor winnings.
-
-## Vulnerability Details
-
-The current issue is that the minimum amount out of the swap is determined onchain which makes sandwich attacks possible as an MEV bot could bundle our transaction with 2 swaps one before and one after to affect the amount we receive on the swap effectively sandwiching out the transaction.
-
-This is how the amountOut is calculated in the UniswapSwap contarct :
-Function `swapExactTokensForTokens` :
-```javascript
-    uint256 _valueIn = sp.amountIn * oracle.consultIn18Decimals(sp.tokenIn) / SAFE_MULTIPLIER;
-    uint256 _amountOutMinimum = _valueIn
-      * SAFE_MULTIPLIER
-      / oracle.consultIn18Decimals(sp.tokenOut)
-      / (10 ** (18 - IERC20Metadata(sp.tokenOut).decimals()))
-      * (10000 - sp.slippage) / 10000;
-```
-
-The bot would make profits from the vault's reward accumulated by the Trove contract, leading to less LP tokens after adding liquidity to the GMX pool. Thus, the depositors will not profit from rewards. 
-
-
-## Impact
-
-High. If the compound() transaction is sandwiched the profits will be greatly reduced. Less incentives to use the protocol.
-
-## Tools Used
-
-Manual Review
-
-## Recommendations
-
-I recommend setting the `amountOut` as function parameter that will be used for the swap to protect price slippage from MEV bots. 
 		
 # Medium Risk Findings
 
@@ -436,55 +388,6 @@ To mitigate this risk, the following recommendations should be implemented:
 
 - Introduce a state check mechanism that prevents emergencyPause from executing if there are pending critical operations that must be completed to ensure the integrity of in-progress transactions.
 - Implement a secure check that allows emergencyPause to queue behind critical operations, ensuring that any ongoing transaction can complete before the pause takes effect.
-## <a id='M-06'></a>M-06. No expiration deadline could result to losing funds during Swaps            
-
-### Relevant GitHub Links
-	
-https://github.com/Cyfrin/2023-10-SteadeFi/blob/0f909e2f0917cb9ad02986f631d622376510abec/contracts/strategy/gmx/GMXDeposit.sol#L308
-
-https://github.com/Cyfrin/2023-10-SteadeFi/blob/0f909e2f0917cb9ad02986f631d622376510abec/contracts/strategy/gmx/GMXProcessWithdraw.sol#L43
-
-https://github.com/Cyfrin/2023-10-SteadeFi/blob/0f909e2f0917cb9ad02986f631d622376510abec/contracts/strategy/gmx/GMXProcessWithdraw.sol#L90
-
-## Summary
-In 3 instances (GMXDeposit.sol (1), GMXProcessWithdraw.sol (2)) does not set an expiration deadline which could result in lose of funds when swapping tokens. 
-
-## Vulnerability Details
-The deadline parameter in the ProcessWithdraw() & ProcessDepositFailureLiquidityWithdrawal() swap is set to block.timestamp. That means the function will accept a token swap at any block number (i.e., no expiration deadline).
-```javascript
-      _sp.tokenIn = _tokenFrom;
-      _sp.tokenOut = _tokenTo;
-      _sp.amountIn = IERC20(_tokenFrom).balanceOf(address(this));
-      _sp.amountOut = _tokenToAmt;
-      _sp.slippage = self.minSlippage;
-@>      _sp.deadline = block.timestamp;
-      // ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-      // We allow deadline to be set as the current block timestamp whenever this function
-      // is called because this function is triggered as a follow up function (by a callback/keeper)
-      // and not directly by a user/keeper. If this follow on function flow reverts due to this tx
-      // being processed after a set deadline, this will cause the vault to be in a "stuck" state.
-      // To resolve this, this function will have to be called again with an updated deadline until it
-      // succeeds/a miner processes the tx.
-
-      GMXManager.swapTokensForExactTokens(self, _sp);
-```
-
-## Impact
-As per the devs comments;
-The reason deadline is set as block.timestamp is that the functions are triggered as a follow-up functions, likely by a callback or keeper, and not directly by a user and that if the current transaction (the follow-up function) is processed after a specific deadline, it could result in a situation where the vault becomes "stuck" which is reasonable however without an expiration deadline :
-
-
-- A malicious miner can hold the transaction for malicious reasons putting the funds at risk.
-
-- Depositor losing on opportunities to withdraw at a profitable time.
-
-More info: https://x.com/bytes032/status/1661344118704881668?s=46&t=ahuBu4vx0GHQr2UGnKTzKA
-
-## Tools Used
-Manual
-
-## Recommendations
-The proper and reasonable approach to this is to set the deadline as the function parameter with a proper timestamp.
 
 # Low Risk Findings
 
